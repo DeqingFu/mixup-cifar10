@@ -38,6 +38,8 @@ parser.add_argument('--no-augment', dest='augment', action='store_false',
 parser.add_argument('--decay', default=1e-4, type=float, help='weight decay')
 parser.add_argument('--alpha', default=1., type=float,
                     help='mixup interpolation coefficient (default: 1)')
+parser.add_argument('--noise_level', default=1., type=float,
+                    help='additive gaussian noise to training data')
 args = parser.parse_args()
 
 use_cuda = torch.cuda.is_available()
@@ -46,10 +48,25 @@ best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
 if args.seed != 0:
+    import random
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = True
 
 # Data
 print('==> Preparing data..')
+class AddGaussianNoise(object):
+    def __init__(self, mean=0., std=1.):
+        self.std = std
+        self.mean = mean
+        
+    def __call__(self, tensor):
+        return tensor + torch.randn(tensor.size()) * self.std + self.mean
+    
+    def __repr__(self):
+        return self.__class__.__name__ + '(mean={0}, std={1})'.format(self.mean, self.std)
+    
 if args.augment:
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -57,12 +74,14 @@ if args.augment:
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465),
                              (0.2023, 0.1994, 0.2010)),
+        AddGaussianNoise(mean=0, std=args.noise_level)
     ])
 else:
     transform_train = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465),
                              (0.2023, 0.1994, 0.2010)),
+        AddGaussianNoise(mean=0, std=args.noise_level)
     ])
 
 
@@ -71,13 +90,13 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-trainset = datasets.CIFAR10(root='~/data', train=True, download=False,
+trainset = datasets.CIFAR10(root='~/data', train=True, download=True,
                             transform=transform_train)
 trainloader = torch.utils.data.DataLoader(trainset,
                                           batch_size=args.batch_size,
                                           shuffle=True, num_workers=8)
 
-testset = datasets.CIFAR10(root='~/data', train=False, download=False,
+testset = datasets.CIFAR10(root='~/data', train=False, download=True,
                            transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=100,
                                          shuffle=False, num_workers=8)
@@ -89,7 +108,7 @@ if args.resume:
     print('==> Resuming from checkpoint..')
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
     checkpoint = torch.load('./checkpoint/ckpt.t7' + args.name + '_'
-                            + str(args.seed))
+                            + str(args.seed) + '_' + str(args.noise_level))
     net = checkpoint['net']
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch'] + 1
@@ -102,7 +121,7 @@ else:
 if not os.path.isdir('results'):
     os.mkdir('results')
 logname = ('results/log_' + net.__class__.__name__ + '_' + args.name + '_'
-           + str(args.seed) + '.csv')
+           + str(args.seed) + '_' + str(args.noise_level) + '.csv')
 
 if use_cuda:
     net.cuda()
@@ -155,7 +174,7 @@ def train(epoch):
                                                       targets_a, targets_b))
         outputs = net(inputs)
         loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
-        train_loss += loss.data[0]
+        train_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)
         correct += (lam * predicted.eq(targets_a.data).cpu().sum().float()
@@ -185,7 +204,7 @@ def test(epoch):
         outputs = net(inputs)
         loss = criterion(outputs, targets)
 
-        test_loss += loss.data[0]
+        test_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)
         correct += predicted.eq(targets.data).cpu().sum()
@@ -214,7 +233,7 @@ def checkpoint(acc, epoch):
     if not os.path.isdir('checkpoint'):
         os.mkdir('checkpoint')
     torch.save(state, './checkpoint/ckpt.t7' + args.name + '_'
-               + str(args.seed))
+               + str(args.seed) + '_' + str(args.noise_level))
 
 
 def adjust_learning_rate(optimizer, epoch):
